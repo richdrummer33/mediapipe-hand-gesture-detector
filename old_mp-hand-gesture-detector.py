@@ -1,23 +1,13 @@
+# cv2 for openCV image processing, display, and labeling
 import cv2
 import mediapipe as mp
 import math
+# MediaPipe for hand/face tracking
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-
-import urllib
-
-# for automation
+# For gesture-triggered hotkey functionality
 import pyautogui
 import time
-
-# if the files are not downloaded, download them
-# print("Downloading images")
-# IMAGE_FILENAMES = ['thumbs_down.jpg', 'victory.jpg', 'thumbs_up.jpg', 'pointing_up.jpg']
-# 
-# print("Downloading images...")
-# for name in IMAGE_FILENAMES:
-#   url = f'https://storage.googleapis.com/mediapipe-tasks/gesture_recognizer/{name}'
-#   urllib.request.urlretrieve(url, name)
 
 # Initialize MediaPipe Hands and Drawing utilities
 mp_hands = mp.solutions.hands
@@ -40,20 +30,30 @@ def resize_and_show(image):
         img = cv2.resize(image, (math.floor(w / (h / DESIRED_HEIGHT)), DESIRED_HEIGHT))
     cv2.imshow('Debug', img)
 
-def fingers_on_face(image, hand_landmarks, x_min, x_max, y_min, y_max):
+def fingers_on_face(image, hand_landmarks, x_min, x_max, y_min, y_max, bounds_multiplier = 1):
+    # get the x, y coordinates of the index and middle fingers
     index_finger = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
     middle_finger = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
     ring_finger = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP]
 
+    # convert the coordinates to pixel values
     index_x, index_y = int(index_finger.x * image.shape[1]), int(index_finger.y * image.shape[0])
     middle_x, middle_y = int(middle_finger.x * image.shape[1]), int(middle_finger.y * image.shape[0])
 
-    fingers_on_face = 0
+    # get the bounds of the face
+    mid_x = image.shape[1] // 2 # convert to pixel values
+    mid_y = image.shape[0] // 2 # convert to pixel values
+    x_min = mid_x - (mid_x - x_min) * bounds_multiplier
+    x_max = mid_x + (x_max - mid_x) * bounds_multiplier
+    y_min = mid_x - (mid_x - y_min) * bounds_multiplier
+    y_max = mid_x + (y_max - mid_x) * bounds_multiplier
 
     # if ring finger is on face, return -1
     if x_min <= ring_finger.x <= x_max and y_min <= ring_finger.y <= y_max:
         return -1
 
+    # count fingers on face
+    fingers_on_face = 0
     if x_min <= index_x <= x_max and y_min <= index_y <= y_max:
         cv2.circle(image, (index_x, index_y), 10, (0, 0, 255), -1)
         cv2.putText(image, f"x_min { x_min } x_max { x_max } \ny_min { y_min } y_max { y_max }", (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
@@ -104,14 +104,8 @@ def gesture_recognizer(image):
 # Check for "Okay" gesture
 def check_ok_gesture(image, hand_landmarks):
 
-    # Function to get x, y coordinates of a landmark
-    def get_coordinates(landmark):
-        x = landmark.x
-        y = landmark.y
-        return x, y
-
-    # Function to get orientation of the hand
-    def orientation(coordinate_landmark_0, coordinate_landmark_9):
+    # Function to get orientation of the hand. NOTE: Unused
+    def cog_get_orientation(coordinate_landmark_0, coordinate_landmark_9):
         x0, y0 = coordinate_landmark_0
         x9, y9 = coordinate_landmark_9
         if abs(x9 - x0) < 0.05:
@@ -122,23 +116,54 @@ def check_ok_gesture(image, hand_landmarks):
             return "Right" if x9 > x0 else "Left"
         if m > 1:
             return "Up" if y9 < y0 else "Down"
-
-    # Get orientation
-    lm0 = get_coordinates(hand_landmarks.landmark[0])
-    lm9 = get_coordinates(hand_landmarks.landmark[9])
-    orient = orientation(lm0, lm9)
     
-    lm4 = get_coordinates(hand_landmarks.landmark[4])
-    lm5 = get_coordinates(hand_landmarks.landmark[5])
+    # get coordinates of fingertips
+    index = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+    thumb = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+    other_fingers_array = [hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP], hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP], hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP]]
+    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+    pinky_knuckle = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP]
+    
+    # A reference distance for scaling distances between fingers
+    max_extent = math.sqrt(math.pow((pinky_knuckle.x - wrist.x), 2) + math.pow((pinky_knuckle.y - wrist.y), 2))
+    # The min distance between index and thumb (0 to 1)
+    thumb_index_dist = math.sqrt(math.pow((index.x - thumb.x), 2) + math.pow((index.y - thumb.y), 2))
 
-    if orient == "Right":
-        print("Right")
-        if lm4[0] < lm5[0]:
-            print("Ok gesture")
+    # Init misc vars for gesture recognition
+    max_dist_to_others = 1      # Max distance is 1
+    lowest_other_finger = None  # The other finger that is lowest on the screen
+    distances_to_others = []    # List of distances from the index finger to all other fingers
+
+    # Is index & thumb close together?
+    if thumb_index_dist < 0.05:
+        # A. Compute the conditional values for determining which gesture, if any, is being made
+        # i) Find the lowest finger that is not the index or thumb
+        for other_finger in other_fingers_array:
+            # Get the lowest finger vertically
+            lowest_other_finger = min(
+                other_fingers_array, 
+                key=lambda other_finger: other_finger.y
+            )
+            # Array of distances from the index finger to "other fingers"
+            distances_to_others.append(math.sqrt(math.pow((index.x - other_finger.x), 2) + math.pow((index.y - other_finger.y), 2)))
+
+        max_dist_to_others = max(distances_to_others)
+        normalized_max_dist_to_others = max_dist_to_others / max_extent
+
+
+        # B. Determine which gesture, if any, is being made
+        # i) Is an OK gesture? NOTE: Y is inverted in OpenCV (0 at top, 1 at bottom)
+        if index.y > lowest_other_finger.y and normalized_max_dist_to_others > 0.3:
             cv2.putText(image, "Okay!!", (500, 200), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 2)
-            return True
-
-    return False
+            return "OK"
+        # ii) Is a PINCH gesture?
+        elif normalized_max_dist_to_others < 0.5:
+            print("normalized_max_dist_to_others: " + str(normalized_max_dist_to_others))
+            cv2.putText(image, "Pinch!!", (500, 200), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 2)
+            #print(f"Max extent: {max_extent}, thumb-index dist: {thumb_index_dist}, normalized thumb-index dist: {thumb_index_dist / max_extent}")
+            return "PINCH"
+    
+    return "NONE"
 
 def draw_face_landmarks_box(image_rgb, results):
     # Draw face bounding box
@@ -154,7 +179,7 @@ def draw_face_landmarks_box(image_rgb, results):
     
         return x_min, x_max, y_min, y_max
     
-    return None
+    return None, None, None, None
 
 debounce = 0.5
 debounce_timer = 0
@@ -168,15 +193,27 @@ def toggle_keystroke_on_gesture(gesture):
         pyautogui.PAUSE = 0.25
         pyautogui.hotkey('alt', 'm')
         gesturing = True
-        print("Gesture detected: Victory")
+        print("Gesture action: Start")
 
     elif gesture is None:
         gesturing = False
 
+def check_gesture_ended():
+    global debounce_timer, gesturing
+    if not gesturing: 
+        return
+    if debounce_timer < 0:
+        pyautogui.PAUSE = 0.25
+        pyautogui.hotkey('alt', 'm')
+        gesturing = False
+        print("Gesture action: End")
+
 # Main function
 def main():
     global last_time, gesturing, debounce_timer, debounce
-    cap = cv2.VideoCapture(0)
+    print("Starting capture...")
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    print("Capture started")
     with mp_hands.Hands(min_detection_confidence=0.3, min_tracking_confidence=0.3) as hands, mp_face.FaceMesh() as face_mesh:
         while cap.isOpened():
             success, image = cap.read()
@@ -199,24 +236,18 @@ def main():
             # Results 3. Hand gesture recognition
             # gesture_recognizer(image_bgr)
             
+            # Results 4. Handle gestures
+            if x_min is not None and hand_landmarks is not None:
+                gesture_status = check_ok_gesture(image_bgr, hand_landmarks) # num_fingers_on_face = fingers_on_face(image_bgr, hand_landmarks, x_min, x_max, y_min, y_max)
 
-            # Results 4. Fingers on face
-            if hand_landmarks != None:
-                is_ok_gesture = check_ok_gesture(image_bgr, hand_landmarks)
-                # num_fingers_on_face = fingers_on_face(image_bgr, hand_landmarks, x_min, x_max, y_min, y_max)
-                #print("num_fingers_on_face " + str(num_fingers_on_face))
-
-                # Is gesturing
-                # if num_fingers_on_face == 2:
-                if is_ok_gesture:
-                    cv2.putText(image_bgr, "Fingers on face", (500, 200), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 2)
+                # Is gesturing OK
+                if gesture_status == "OK": # num_fingers_on_face == 2:
                     toggle_keystroke_on_gesture("Victory")
                     debounce_timer = debounce
 
-                # Not gesturing
-                elif not is_ok_gesture and gesturing:
-                    if debounce_timer < 0:
-                        toggle_keystroke_on_gesture(None)
+                # Is gesturing PINCH
+                elif gesture_status == "PINCH":
+                    check_gesture_ended()
 
             # Show the image
             cv2.imshow('MediaPipe Hands', image_bgr)
